@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html>
+<head>
+<!-- Load the Paper.js library -->
+<script type="text/javascript" src="js/paper.js"></script>
+<!-- Load external PaperScript and associate it with myCanvas -->
+<script type="text/paperscript" canvas="myCanvas">
+    var GRAVITY = [0, 9.81];
+    var TIMESTEP = 0.1;
+    var BOUNDS = view.size;
+
+    var ParticleSystem = Base.extend({
+        initialize: function() {
+            this.particles = [];
+        },
+
+        verlet: function() {
+            for (var i = 0; i < this.particles.length; i++) {
+                this.particles[i].verlet();
+            }
+        },
+
+        accumulateForces: function() {
+            for (var i = 0; i < this.particles.length; i++) {
+                this.particles[i].accumulateForces();
+            }
+        },
+
+        satisfyConstraints: function() {
+            for (var i = 0; i < this.particles.length; i++) {
+                this.particles[i].satisfyConstraints();
+            }
+        },
+
+        draw: function() {
+            for (var i = 0; i < this.particles.length; i++) {
+                this.particles[i].draw();
+            }
+        }
+    });
+
+    var BoundedPoint = Base.extend({
+        initialize: function(point, weight, initialVector) {
+            this.position = point.clone();
+            this.oldPosition = point.clone() - (initialVector || [0,0]);
+            this.weight = weight || 1;
+            this.inverseWeight = 1.0 / this.weight;
+            this.dampening = 0.99;
+            this.forces = new Point([0,0]);
+            this.pullPosition = null;
+            this.pushDirection = null;
+            
+            this.circle = new Path.Circle(this.position, 15);
+            this.circle.fillColor = new HsbColor(Math.random() * 360, 1, 1);
+            project.activeLayer.appendTop(this.circle);
+
+            BoundedPoint.paths[this.circle.id] = this;
+        },
+
+        verlet: function() {
+            var tmpPosition = this.position.clone();
+            this.position = this.position+(this.position-this.oldPosition)*this.dampening+(this.forces*TIMESTEP*TIMESTEP)
+            this.oldPosition = tmpPosition;
+        },
+
+        accumulateForces: function() {
+            this.forces = new Point([0,0]);
+            this.forces += GRAVITY;
+
+            if (this.pullPosition) {
+                this.forces += (this.pullPosition - this.position).normalize(25);
+            }
+
+            if (this.pushDirection) {
+                this.forces += this.pushDirection;
+            }
+        },
+
+        satisfyConstraints: function() {
+            this.position = Point.min(Point.max(this.position, [50,50]), BOUNDS - [50,50]);
+
+            if (typeof this.additionalConstraints == "function") {
+                this.additionalConstraints();
+            }
+        },
+
+        ensureDistance: function(otherPoint, requiredDistance, stiffness) {
+            var stiffness = stiffness || 1;
+            var distance = this.position.getDistance(otherPoint.position);
+
+            var delta = this.position - otherPoint.position;
+            var diff = (distance - requiredDistance) / (distance * (this.inverseWeight + otherPoint.inverseWeight));
+
+            this.position -= delta * this.inverseWeight * stiffness * diff;
+            otherPoint.position += delta * otherPoint.inverseWeight * stiffness * diff;
+        },
+
+        ensureMinDistance: function(otherPoint, requiredDistance) {
+            var stiffness = stiffness || 1;
+            var distance = this.position.getDistance(otherPoint.position);
+
+            if (distance < requiredDistance) {
+                var delta = this.position - otherPoint.position;
+                var diff = (distance - requiredDistance) / (distance * (this.inverseWeight + otherPoint.inverseWeight));
+
+                this.position -= delta * this.inverseWeight * stiffness * diff;
+                otherPoint.position += delta * otherPoint.inverseWeight * stiffness * diff;
+            }
+        },
+
+        ensureMaxDistance: function(otherPoint, requiredDistance) {
+            var stiffness = stiffness || 1;
+            var distance = this.position.getDistance(otherPoint.position);
+
+            if (distance > requiredDistance) {
+                var delta = this.position - otherPoint.position;
+                var diff = (distance - requiredDistance) / (distance * (this.inverseWeight + otherPoint.inverseWeight));
+
+                this.position -= delta * this.inverseWeight * stiffness * diff;
+                otherPoint.position += delta * otherPoint.inverseWeight * stiffness * diff;
+            }
+        },
+
+        draw: function() {
+            this.circle.position = this.position;
+        }
+    });
+
+    BoundedPoint.paths = {};
+
+    var Bone = Base.extend({
+        initialize: function(startPoint, endPoint, stiffness) {
+            this.startPoint = startPoint;
+            this.endPoint = endPoint;
+            this.stiffness = stiffness;
+
+            this.length = this.startPoint.position.getDistance(this.endPoint.position);
+            
+            this.line = Path.Line(this.startPoint.position, this.endPoint.position);
+            this.line.strokeWidth = 15;
+            this.line.strokeColor = new HsbColor(Math.random() * 360, 1, 1);
+            project.activeLayer.appendBottom(this.line);
+        },
+
+        verlet: function() {
+
+        },
+
+        accumulateForces: function() {
+
+        },
+
+        satisfyConstraints: function() {
+            this.startPoint.ensureDistance(this.endPoint, this.length, this.stiffness);
+        },
+
+        draw: function() {
+            this.line.firstSegment.point = this.startPoint.position;
+            this.line.lastSegment.point = this.endPoint.position;
+        }
+    });
+
+    var Skeleton = Base.extend({
+        initialize: function() {
+            this.bones = [];
+            this.points = [];
+            this.iterations = 1;
+        },
+
+        verlet: function() {
+            for (var i = 0; i < this.points.length; i++) {
+                this.points[i].verlet();
+            }
+        },
+
+        accumulateForces: function() {
+            for (var i = 0; i < this.points.length; i++) {
+                this.points[i].accumulateForces();
+            }
+        },
+
+        satisfyConstraints: function() {
+            for (var i = 0; i < this.iterations; i++) {
+                for (var i = 0; i < this.points.length; i++) {
+                    this.points[i].satisfyConstraints();
+                }
+
+                for (var j = 0; j < this.bones.length; j++) {
+                    this.bones[j].satisfyConstraints();
+                }
+
+                if (typeof this.additionalConstraints == "function") {
+                    this.additionalConstraints();
+                }
+            }
+        },
+
+        draw: function() {
+            for (var i = 0; i < this.points.length; i++) {
+                this.points[i].draw();
+            }
+
+            for (var j = 0; j < this.bones.length; j++) {
+                this.bones[j].draw();
+            }
+        }
+
+    });
+
+    function createHold(position) {
+        var point = new Point(position);
+        var hold = new BoundedPoint(point);
+        hold.additionalConstraints = function() {
+            hold.position = point;
+        }
+        return hold;
+    }
+
+    var particleSystem = new ParticleSystem();
+
+    var holdPositions = [[300,90], [700,120], [410, 375], [690, 360], [320, 210], [510, 520], [690, 560], [670, 780], [360, 750]];
+    var holds = {};
+    for (var i = 0; i < holdPositions.length; i++) {
+        var hold = createHold(holdPositions[i]);
+        particleSystem.particles.push(hold);
+        holds[hold.circle.id] = hold;
+    }
+
+    var skeleton = new Skeleton();
+    var torsoTop = new BoundedPoint(new Point([500,100]), 10);
+    var torsoBottom = new BoundedPoint(new Point([500,300]), 10, new Point([-0, 0]));
+    var elbowLeft = new BoundedPoint(new Point([460,200]), 6);
+    var elbowRight = new BoundedPoint(new Point([540,200]), 6);
+    var handLeft = new BoundedPoint(new Point([440,325]), 2);
+    var handRight = new BoundedPoint(new Point([560,325]), 2);
+    var kneeLeft = new BoundedPoint(new Point([475,425]), 6);
+    var kneeRight = new BoundedPoint(new Point([525,425]), 6);
+    var footLeft = new BoundedPoint(new Point([475,550]), 2);
+    var footRight = new BoundedPoint(new Point([525,550]), 2);
+
+    skeleton.points.push(torsoTop);
+    skeleton.points.push(torsoBottom);
+    skeleton.points.push(elbowLeft);
+    skeleton.points.push(elbowRight);
+    skeleton.points.push(handLeft);
+    skeleton.points.push(handRight);
+    skeleton.points.push(kneeLeft);
+    skeleton.points.push(kneeRight);
+    skeleton.points.push(footLeft);
+    skeleton.points.push(footRight);
+
+    skeleton.bones.push(new Bone(torsoTop, torsoBottom));
+    skeleton.bones.push(new Bone(torsoTop, elbowLeft));
+    skeleton.bones.push(new Bone(torsoTop, elbowRight));
+    skeleton.bones.push(new Bone(elbowLeft, handLeft));
+    skeleton.bones.push(new Bone(elbowRight, handRight));
+    skeleton.bones.push(new Bone(torsoBottom, kneeLeft));
+    skeleton.bones.push(new Bone(torsoBottom, kneeRight));
+    skeleton.bones.push(new Bone(kneeLeft, footLeft));
+    skeleton.bones.push(new Bone(kneeRight, footRight));
+
+    skeleton.additionalConstraints = function() {
+        // torsoTop.position = torsoTop.oldPosition;
+        
+        kneeLeft.ensureMinDistance(kneeRight, 40);
+        kneeLeft.ensureMaxDistance(kneeRight, 225);
+        kneeLeft.ensureMinDistance(torsoTop, 100);
+        kneeRight.ensureMinDistance(torsoTop, 100);
+        elbowLeft.ensureMinDistance(elbowRight, 40);
+        footLeft.ensureMinDistance(torsoBottom, 30);
+        footRight.ensureMinDistance(torsoBottom, 30);
+
+        footLeft.ensureMaxDistance(torsoBottom, 240);
+        footRight.ensureMaxDistance(torsoBottom, 240);
+
+        footLeft.ensureDistance(torsoTop, 520, 0.001);
+        footRight.ensureDistance(torsoTop, 520, 0.001);
+    }
+
+    particleSystem.particles.push(skeleton);
+
+    // setInterval(function() {
+    //     elbowLeft.pushDirection = new Point([-10, -25]);
+    // }, 1100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         elbowLeft.pushDirection = null;
+    //     }, 1100);
+    // }, 550);
+
+    // setInterval(function() {
+    //     elbowRight.pushDirection = null;
+    // }, 1100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         elbowRight.pushDirection = new Point([10, -25]);
+    //     }, 1100);
+    // }, 550);
+
+    // setInterval(function() {
+    //     kneeLeft.pushDirection = new Point([-10, -25]);
+    // }, 1100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         kneeLeft.pushDirection = null;
+    //     }, 1100);
+    // }, 550);
+
+    // setInterval(function() {
+    //     kneeRight.pushDirection = null;
+    // }, 1100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         kneeRight.pushDirection = new Point([10, -25]);
+    //     }, 1100);
+    // }, 550);
+
+    // setInterval(function() {
+    //     torsoBottom.pushDirection = new Point([-50, 0]);
+    // }, 2200);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         torsoBottom.pushDirection = null;
+    //     }, 2200);
+    // }, 100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         torsoBottom.pushDirection = new Point([50, 0]);
+    //     }, 2200);
+    // }, 1100);
+
+    // setTimeout(function() {
+    //     setInterval(function() {
+    //         torsoBottom.pushDirection = null;
+    //     }, 2200);
+    // }, 1200);
+
+    var hitOptions = {
+        segments: true,
+        stroke: true,
+        fill: true,
+        tolerance: 3
+    };
+
+    function onFrame() {
+        particleSystem.accumulateForces();
+        particleSystem.verlet();
+        particleSystem.satisfyConstraints();
+        particleSystem.draw();
+    }
+
+    function onMouseMove(event) {
+        var hitResult = project.hitTest(event.point, hitOptions);
+        project.activeLayer.selected = false;
+        if (hitResult && hitResult.item && BoundedPoint.paths[hitResult.item.id]) {
+            hitResult.item.selected = true;
+        }
+    }
+
+    var draggedPath = null;
+    function onMouseDown(event) {
+        draggedPath = null;
+        var hitResult = project.hitTest(event.point, hitOptions);
+
+        if (hitResult) {
+            draggedPath = hitResult.item;
+        }
+    }
+
+    function attachLimbToHold(point, hold) {
+        point.additionalConstraints = function() {
+            if(point.position.getDistance(hold.position) > 10) {
+                point.additionalConstraints = null;
+            } else {
+                point.position = hold.position;
+            }
+        }
+    }
+
+    function onMouseUp(event) {
+        if (draggedPath && (point = BoundedPoint.paths[draggedPath.id])) {
+            
+            if (!holds[draggedPath.id]) {
+                point.additionalConstraints = null;
+                for (var key in holds) {
+                    if (point.position.getDistance(holds[key].position) < 25) {
+                        attachLimbToHold(point, holds[key]);
+                        break;
+                    }
+                }
+            }
+
+            point.pullPosition = null;
+            point.inverseWeight = 1.0 / point.weight;
+            draggedPath = null;
+        }
+    }
+
+    function onMouseDrag(event) {
+        if (draggedPath && (point = BoundedPoint.paths[draggedPath.id])) {
+            if (!holds[draggedPath.id]) {
+                point.additionalConstraints = null;
+            }
+            point.pullPosition = event.lastPoint;
+            point.inverseWeight = 0.04;
+        }
+    }
+</script>
+</head>
+<body>
+    <canvas id="myCanvas" resize></canvas>
+</body>
+</html>
